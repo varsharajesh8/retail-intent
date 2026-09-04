@@ -1,3 +1,4 @@
+import argparse
 import gzip
 import shutil
 from pathlib import Path
@@ -7,7 +8,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 from tqdm import tqdm
-import argparse
 
 DATA_URL = "https://data.rees46.com/datasets/marketplace/2019-Oct.csv.gz"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"

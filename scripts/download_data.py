@@ -1,3 +1,4 @@
+import argparse
 import gzip
 import shutil
 from pathlib import Path
@@ -7,7 +8,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 from tqdm import tqdm
-import argparse
 
 DATA_URL = "https://data.rees46.com/datasets/marketplace/2019-Oct.csv.gz"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -120,15 +120,24 @@ def main():
 
     DATA_DIR.mkdir(exist_ok = True)
 
-    download(DATA_URL, RAW_GZ)
-    unzip(RAW_GZ, RAW_CSV)
 
-    # If we want to build full parquet, do that first, then make the sample. If we only want the sample, skip building full parquet.
+    if RAW_CSV.exists():
+        print(f"[skip] {RAW_CSV} already exists.")
+
+    else:
+        download(DATA_URL, RAW_GZ)
+        unzip(RAW_GZ, RAW_CSV)
+
     if not args.skip_full_parquet:
         csv_to_parquet(RAW_CSV, FULL_PARQUET)
+    else:
+        print("Skipped full parquet build (--skip-full-parquet)")
+
+    if FULL_PARQUET.exists():
         make_sample(FULL_PARQUET, SAMPLE_PARQUET, args.sample_frac)
     else:
-        print("Skipped full parquet. Sample step needs it, run without --skip-full-parquet")
+        print("Cannot build sample - events_full.parquet does not exist yet")
+    
     print("\nDone. Use data/events_sample.parquet for iteration, data/events_full.parquet for final run.")
 
 

@@ -1,15 +1,16 @@
-import re
-import pandas as pd
-import numpy as np
-import os
 import json
+import os
+import re
 import time
-import anthropic
 from pathlib import Path
+
+import anthropic
+import numpy as np
+import pandas as pd
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SAMPLE_PARQUET = DATA_DIR / "events_sample.parquet"

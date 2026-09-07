@@ -8,10 +8,15 @@ SAMPLE_PARQUET = DATA_DIR / "events_sample.parquet"
 SESSION_FEATURES_OUT = DATA_DIR / "session_features.parquet"
 USER_FEATURES_OUT = DATA_DIR / "user_features.parquet"
 
+
 def load_and_clean(path: Path) -> pd.DataFrame:
     """Load and clean the data from the parquet file."""
     df = pd.read_parquet(path)
 
+    # Remove exact duplicate event records identified during EDA.
+    # Similar events at different timestamps are retained as real behavior.
+    df = df.drop_duplicates().copy()
+    
     # Missingness treatment: diagnosed in EDA notebook, missingness is systematic, not random, so we keep it as a signal rather than dropping rows
     for col in ["category_code", "brand"]:
         # preserves informative singal

@@ -82,6 +82,45 @@ def build_session_features_realtime(df: pd.DataFrame) -> pd.DataFrame:
     features["purchased"] = full_purchased
     return features.reset_index()
 
+def build_session_user_history_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each session, compute the session's user's purchase history using
+    ONLY events strictly before this session's own start time. This lets the
+    session model see "is this a new visitor or a returning customer,"
+    without leaking anything from the current or future sessions.
+    """
+    session_starts = df.groupby("user_session").agg(
+        user_id=("user_id", "first"),
+        session_start=("event_time", "min"),
+    ).reset_index()
+
+    purchases = df[df["event_type"] == "purchase"][["user_id", "user_session", "event_time", "price"]]
+    # collapse to order-level first (one row per session that had a purchase)
+    orders = purchases.groupby(["user_id", "user_session"]).agg(
+        order_time=("event_time", "min"),
+        order_value=("price", "sum"),
+    ).reset_index()
+
+    # join each session against its OWN user's orders, then keep only strictly-prior ones
+    merged = session_starts.merge(orders, on="user_id", how="left", suffixes=("", "_order"))
+    merged["is_prior"] = merged["order_time"] < merged["session_start"]
+    prior_orders = merged[merged["is_prior"]]
+
+    agg = prior_orders.groupby("user_session").agg(
+        user_past_orders=("user_session_order", "nunique"),
+        user_past_spend=("order_value", "sum"),
+        user_last_purchase_time=("order_time", "max"),
+    ).reset_index()
+
+    result = session_starts[["user_session", "session_start"]].merge(agg, on="user_session", how="left")
+    result["user_past_orders"] = result["user_past_orders"].fillna(0)
+    result["user_past_spend"] = result["user_past_spend"].fillna(0)
+    result["user_days_since_last_purchase"] = (
+        (result["session_start"] - result["user_last_purchase_time"]).dt.total_seconds() / 86400
+    )
+
+    return result[["user_session", "user_past_orders", "user_past_spend", "user_days_since_last_purchase"]]
+
 
 # Building RFM features for one cutoff, then rolling across all cutoffs
 # cutoffs range from 2019-10-08 to 2019-10-24, every 3 days, with a 7-day lookahead for the label
@@ -151,8 +190,12 @@ if __name__ == "__main__":
 
     session_features_oracle = session_features  # full-session version, already built = "oracle"
     session_features_realtime = build_session_features_realtime(df)
+
+    user_history = build_session_user_history_features(df)    
+    session_features_realtime = session_features_realtime.merge(user_history, on="user_session", how="left")
     print(session_features_realtime.shape)
-    session_features_realtime.to_parquet(DATA_DIR / "session_features_realtime.parquet", index=False)
+    session_features_realtime.to_parquet(DATA_DIR / "session_features_realtime.parquet", index = False)
+
 
     # Sanity check: sessions dropped from realtime (should be sessions whose
     # very first event is a purchase, leaving no pre-purchase history)
@@ -184,3 +227,9 @@ if __name__ == "__main__":
 
     oct1_7_purchasers = df.loc[(df["event_type"] == "purchase") & (df["event_time"] < "2019-10-08"), "user_id"].nunique()
     print(oct1_7_purchasers)
+
+    oracle_df = pd.read_parquet(DATA_DIR / "session_features.parquet")
+    realtime_df = pd.read_parquet(DATA_DIR / "session_features_realtime.parquet")
+
+    print("Oracle purchase rate:", oracle_df["purchased"].mean())
+    print("Realtime purchase rate:", realtime_df["purchased"].mean())

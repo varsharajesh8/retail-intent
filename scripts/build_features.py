@@ -5,7 +5,6 @@ import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SAMPLE_PARQUET = DATA_DIR / "events_sample.parquet"
-SESSION_FEATURES_OUT = DATA_DIR / "session_features.parquet"
 USER_FEATURES_OUT = DATA_DIR / "user_features.parquet"
 
 
@@ -16,116 +15,15 @@ def load_and_clean(path: Path) -> pd.DataFrame:
     # Remove exact duplicate event records identified during EDA.
     # Similar events at different timestamps are retained as real behavior.
     df = df.drop_duplicates().copy()
-    
+
     # Missingness treatment: diagnosed in EDA notebook, missingness is systematic, not random, so we keep it as a signal rather than dropping rows
     for col in ["category_code", "brand"]:
-        # preserves informative singal
+        # preserves informative signal
         df[f"{col}_missing"] = df[col].isna()
         # makes column usable for grouping and encoding (rather than NaN)
         df[col] = df[col].fillna("unknown")
 
     return df
-
-def build_session_features(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per session: behavioral features + purchase label. Uses entire, complete session, including post-purchase events. This is the "oracle" version."""
-    is_view = df["event_type"] == "view"
-    is_cart = df["event_type"] == "cart"
-    is_purchase = df["event_type"] == "purchase"
-
-    g = df.groupby("user_session")
-
-    # Feature store
-    features = pd.DataFrame({
-        "n_events": g.size(),
-        "n_views": is_view.groupby(df["user_session"]).sum(),
-        "n_carts": is_cart.groupby(df["user_session"]).sum(),
-        "n_distinct_products": g["product_id"].nunique(),
-        "n_distinct_categories": g["category_id"].nunique(),
-        "avg_price_viewed": g["price"].mean(),
-        "max_price_viewed": g["price"].max(),
-        "session_duration_sec": (g["event_time"].max() - g["event_time"].min()).dt.total_seconds(),
-        "pct_missing_category": g["category_code_missing"].mean(),
-        "has_cart_add": is_cart.groupby(df["user_session"]).any(),
-        # Label: stored with features for traceability, will enforce separation at model training
-        "purchased": is_purchase.groupby(df["user_session"]).any(),
-    })
-
-    return features.reset_index()
-
-def truncate_before_purchase(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Real-time simulation: for each session, keep only events strictly before
-    its first purchase (if any). Non-converting sessions are kept whole, since
-    there is no purchase event to truncate before. (DEPLOYABLE VERSION)
-    """
-    df = df.sort_values("event_time")
-    is_purchase = df["event_type"] == "purchase"
-    # one row per session, with the timestamp of the first purchase in that session (if any)
-    first_purchase_time = df[is_purchase].groupby("user_session")["event_time"].min()
-
-    df = df.merge(
-        first_purchase_time.rename("first_purchase_time"),
-        # left join, sessions with no purchase will have NaN for first_purchase_time 
-        on="user_session", how="left"
-    )
-    # Keep events that are either in sessions with no purchase, or that occur before the first purchase in their session
-    keep = df["first_purchase_time"].isna() | (df["event_time"] < df["first_purchase_time"])
-    # Drop the first_purchase_time column, since it was only used for filtering and is not a feature we want to keep
-    return df[keep].drop(columns=["first_purchase_time"])
-
-
-def build_session_features_realtime(df: pd.DataFrame) -> pd.DataFrame:
-    """Same feature definitions as build_session_features, but computed only
-    on pre-purchase events — this is the leakage-safe version for Task C.1."""
-    truncated = truncate_before_purchase(df)
-
-    features = build_session_features(truncated)
-    # purchased label must come from the FULL session, not the truncated one,
-    # since truncation removes the purchase event itself
-    full_purchased = (df["event_type"] == "purchase").groupby(df["user_session"]).any()
-    features = features.set_index("user_session")
-    features["purchased"] = full_purchased
-    return features.reset_index()
-
-def build_session_user_history_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For each session, compute the session's user's purchase history using
-    ONLY events strictly before this session's own start time. This lets the
-    session model see "is this a new visitor or a returning customer,"
-    without leaking anything from the current or future sessions.
-    """
-    session_starts = df.groupby("user_session").agg(
-        user_id=("user_id", "first"),
-        session_start=("event_time", "min"),
-    ).reset_index()
-
-    purchases = df[df["event_type"] == "purchase"][["user_id", "user_session", "event_time", "price"]]
-    # collapse to order-level first (one row per session that had a purchase)
-    orders = purchases.groupby(["user_id", "user_session"]).agg(
-        order_time=("event_time", "min"),
-        order_value=("price", "sum"),
-    ).reset_index()
-
-    # join each session against its OWN user's orders, then keep only strictly-prior ones
-    merged = session_starts.merge(orders, on="user_id", how="left", suffixes=("", "_order"))
-    merged["is_prior"] = merged["order_time"] < merged["session_start"]
-    prior_orders = merged[merged["is_prior"]]
-
-    agg = prior_orders.groupby("user_session").agg(
-        user_past_orders=("user_session_order", "nunique"),
-        user_past_spend=("order_value", "sum"),
-        user_last_purchase_time=("order_time", "max"),
-    ).reset_index()
-
-    result = session_starts[["user_session", "session_start"]].merge(agg, on="user_session", how="left")
-    result["user_past_orders"] = result["user_past_orders"].fillna(0)
-    result["user_past_spend"] = result["user_past_spend"].fillna(0)
-    result["user_days_since_last_purchase"] = (
-        (result["session_start"] - result["user_last_purchase_time"]).dt.total_seconds() / 86400
-    )
-
-    return result[["user_session", "user_past_orders", "user_past_spend", "user_days_since_last_purchase"]]
-
 
 # Building RFM features for one cutoff, then rolling across all cutoffs
 # cutoffs range from 2019-10-08 to 2019-10-24, every 3 days, with a 7-day lookahead for the label
@@ -346,7 +244,7 @@ def build_user_features_for_cutoff(df: pd.DataFrame, cutoff: pd.Timestamp) -> pd
     features[ratio_cols] = (
         features[ratio_cols]
         .replace([np.inf, -np.inf], np.nan)
-        .fillna(0)
+        .fillna(z0)
     )
 
     last_purchase_time = (
@@ -601,58 +499,51 @@ def build_user_features(df: pd.DataFrame) -> pd.DataFrame:
 
 if __name__ == "__main__":
     df = load_and_clean(SAMPLE_PARQUET)
-    session_features = build_session_features(df)
-    print(session_features.shape)
-    print(session_features.head())
-    session_features.to_parquet(SESSION_FEATURES_OUT, index = False)
 
     user_features = build_user_features(df)
-    print(user_features.shape)
+
+    print("User feature shape:", user_features.shape)
     print(user_features.head())
-    user_features.to_parquet(USER_FEATURES_OUT, index = False)
 
-    session_features_oracle = session_features  # full-session version, already built = "oracle"
-    session_features_realtime = build_session_features_realtime(df)
+    user_features.to_parquet(
+        USER_FEATURES_OUT,
+        index=False
+    )
 
-    user_history = build_session_user_history_features(df)    
-    session_features_realtime = session_features_realtime.merge(user_history, on="user_session", how="left")
-    print(session_features_realtime.shape)
-    session_features_realtime.to_parquet(DATA_DIR / "session_features_realtime.parquet", index = False)
+    # Basic label sanity checks.
+    purchase_rate = (
+        user_features["will_purchase_next_7d"].mean()
+    )
 
+    positive_labels = (
+        user_features["will_purchase_next_7d"].sum()
+    )
 
-    # Sanity check: sessions dropped from realtime (should be sessions whose
-    # very first event is a purchase, leaving no pre-purchase history)
-    oracle_sessions = set(session_features_oracle["user_session"])
-    realtime_sessions = set(session_features_realtime["user_session"])
-    missing = oracle_sessions - realtime_sessions
-    print(len(missing))
+    total_rows = len(user_features)
 
-    # overall purchase rate in the sample, for sanity check
-    print(user_features["will_purchase_next_7d"].mean() * 100)
-    print(user_features["will_purchase_next_7d"].sum())
+    print(
+        f"7-day purchase label rate: "
+        f"{purchase_rate:.4%}"
+    )
 
-    # how many distinct users get a positive label at all
-    positive_users = user_features.loc[user_features["will_purchase_next_7d"], "user_id"].nunique()
-    total_eligible_users = user_features["user_id"].nunique()
-    print(positive_users, total_eligible_users, positive_users / total_eligible_users * 100)
+    print(
+        f"Positive user-cutoff observations: "
+        f"{positive_labels:,} / {total_rows:,}"
+    )
 
-    # does this roughly reconcile with known purchase counts from Day 2
-    distinct_purchasers_overall = df.loc[df["event_type"] == "purchase", "user_id"].nunique()
-    print(distinct_purchasers_overall)
+    # Number of distinct users receiving at least one
+    # positive label across all generated cutoffs.
+    positive_users = (
+        user_features.loc[
+            user_features["will_purchase_next_7d"],
+            "user_id",
+        ]
+        .nunique()
+    )
 
-    # spot check user by hand
-    example = user_features[user_features["will_purchase_next_7d"]].iloc[0]
-    uid, cutoff = example["user_id"], example["cutoff_date"]
-    print(uid, cutoff)
+    total_users = user_features["user_id"].nunique()
 
-    user_events = df[df["user_id"] == uid].sort_values("event_time")
-    print(user_events[["event_time", "event_type"]].to_string(index=False))
-
-    oct1_7_purchasers = df.loc[(df["event_type"] == "purchase") & (df["event_time"] < "2019-10-08"), "user_id"].nunique()
-    print(oct1_7_purchasers)
-
-    oracle_df = pd.read_parquet(DATA_DIR / "session_features.parquet")
-    realtime_df = pd.read_parquet(DATA_DIR / "session_features_realtime.parquet")
-
-    print("Oracle purchase rate:", oracle_df["purchased"].mean())
-    print("Realtime purchase rate:", realtime_df["purchased"].mean())
+    print(
+        f"Users positive at least once: "
+        f"{positive_users:,} / {total_users:,}"
+    )

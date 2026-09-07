@@ -1,16 +1,19 @@
-import pandas as pd
-import numpy as np
 from pathlib import Path
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    roc_auc_score, average_precision_score, precision_score,
-    recall_score, f1_score, classification_report, precision_recall_curve
-)
+
+import pandas as pd
 from lightgbm import LGBMClassifier
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from scipy.stats import randint, uniform
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
+from sklearn.preprocessing import StandardScaler
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 

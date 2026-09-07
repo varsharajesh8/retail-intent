@@ -82,39 +82,46 @@ def csv_to_parquet(src_csv: Path, dest_parquet: Path, chunksize: int = 2_000_000
     print(f"Finished writing {total_rows:,} rows to {dest_parquet}")
 
 def make_sample(full_parquet: Path, sample_parquet: Path, frac: float, seed: int = 40) -> None:
-    """Make a sample of the full parquet file. 
-    How to sample: NOT randomly picking individual rows, but by randomly picking whole 
-    user_sessions and keeping every row in those sessions in order to not remove events from a session 
-    (want to know if complete session ended in purchase)"""
+    """Build a reproducible user-level sample. 
+
+    Randomly sample users, then retain every event from every session belonging to those selected users.
+    This preserves each sampled user's complete observed October history for user-level prediction."""
 
     import pyarrow.dataset as ds
 
     if sample_parquet.exists():
         print(f"[skip] {sample_parquet} already exists.")
         return
-    print(f"Building {frac:.0%} session-stratified sample")
+    print(f"Building {frac:.0%} user-level sample")
 
-    # Loads data into memory, but only the user_session column (much smaller than full dataset)
-    # Plain pandas for lightweight column-only read
-    session_col = pd.read_parquet(full_parquet, columns = ["user_session"])["user_session"]
-    sessions = session_col.unique()
-    # Randomly sample a fraction of sessions and keep all rows in those sessions
-    keep = set(pd.Series(sessions).sample(frac = frac, random_state = seed).tolist())
-    del session_col, sessions
+    # Read user_id first to sample users without loading entire event dataset to memory
+    user_col = pd.read_parquet(full_parquet, columns = ["user_id"])["user_id"]
+    users = user_col.unique()
 
-    # Does not load anything. Lazy pointer to file, uses pyarrow's dataset API for large filtered read
+    # Randomly sample users with a fixed seed
+    keep_users = set(
+        pd.Series(users).sample(frac = frac, random_state = seed).tolist()
+    )
+    del user_col, users
+
+    # Read only the events belonging to those users
     dataset = ds.dataset(full_parquet, format = "parquet")
-    # Applies filter while reading the file, so only keeps rows in the sampled sessions. Loads those rows into memory.
-    table = dataset.to_table(filter = ds.field("user_session").isin(list(keep)))
+    table = dataset.to_table(filter = ds.field("user_id").isin(list(keep_users)))
     sample = table.to_pandas()
-    print(f"Sample: {len(sample):,} rows, {sample['user_session'].nunique():,} sessions")
+
+    print(
+        f"Sample: {len(sample):,} rows, "
+        f"{sample['user_id'].nunique():,} users, "
+        f"{sample['user_session'].nunique():,} sessions"
+    )
     sample.to_parquet(sample_parquet, index = False)
+
 
 def main():
     # Defining command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample-frac", type = float, default = 0.08,
-                        help = "Fraction of sessions to keep in the working sample")
+                        help = "Fraction of users to keep in the working sample")
     parser.add_argument("--skip-full-parquet", action = "store_true", help = "Skip building the full parquet (if you only need the sample)")
     args = parser.parse_args()
 

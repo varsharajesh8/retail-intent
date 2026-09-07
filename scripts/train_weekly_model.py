@@ -15,56 +15,105 @@ from sklearn.preprocessing import StandardScaler
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-FEATURE_COLS = [
+FEATURE_COLS_CORE = [
     "recency_days",
     "days_since_first_seen",
     "n_sessions",
     "n_events",
+    "avg_price_viewed",
+]
+
+FEATURE_COLS_ENGAGEMENT_ONLY = [
+    "n_views",
+    "n_carts",
+    "events_per_session",
+    "views_per_session",
+    "carts_per_session",
+    "cart_view_ratio",
+    "unique_products",
+    "unique_categories",
+]
+
+FEATURE_COLS_PURCHASE_HISTORY = [
     "n_purchase_events",
     "n_orders",
     "total_spend",
-    "avg_price_viewed",
     "avg_order_value",
+    "historical_conversion_rate",
+    "days_since_last_purchase",
 ]
+
+FEATURE_COLS_CORE_ENGAGEMENT = (
+    FEATURE_COLS_CORE
+    + FEATURE_COLS_ENGAGEMENT_ONLY
+)
+
+FEATURE_COLS_FULL_STRUCTURED = (
+    FEATURE_COLS_CORE
+    + FEATURE_COLS_ENGAGEMENT_ONLY
+    + FEATURE_COLS_PURCHASE_HISTORY
+)
+
+FEATURE_COLS_PRODUCT_CATEGORY = [
+    "unique_products_viewed",
+    "unique_categories_viewed",
+    "unique_brands",
+    "max_views_same_product",
+    "repeat_view_ratio",
+    "category_diversity_ratio",
+    "brand_diversity_ratio",
+    "min_price_viewed",
+    "median_price_viewed",
+    "max_price_viewed",
+    "std_price_viewed",
+    "price_range_viewed",
+]
+
+FEATURE_COLS_FULL_PLUS_PRODUCT = (
+    FEATURE_COLS_FULL_STRUCTURED
+    + FEATURE_COLS_PRODUCT_CATEGORY
+)
+
+FEATURE_COLS_SEMANTIC = [
+    f"user_text_dim_{i}"
+    for i in range(20)
+]
+
+FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC = (
+    FEATURE_COLS_FULL_PLUS_PRODUCT
+    + FEATURE_COLS_SEMANTIC
+)
 LABEL_COL = "will_purchase_next_7d"
 
 
 def load_and_split_by_cutoff(
-        path: Path,
-        validation_cutoffs: list,
-        test_cutoffs: list,
+    path: Path,
+    validation_cutoffs: list,
+    test_cutoffs: list,
 ) -> tuple:
-    """Splitting into train, validation, and test sets. Validation is for the purpose of model and threshold selection."""
+    """
+    Split the user-cutoff dataset chronologically into
+    train, validation, and test sets.
+
+    Feature columns are selected later so that different
+    feature sets can be compared on the exact same rows.
+    """
 
     df = pd.read_parquet(path)
 
-    X = df[FEATURE_COLS].copy()
-    y = df[LABEL_COL].astype(int)
-
-    # avg_order_value is NaN for users with no prior orders; fill with sentinel distinct from real vals
-    X["avg_order_value"] = X["avg_order_value"].fillna(-1)
+    # avg_order_value is NaN for users with no prior orders.
+    # Use -1 as a sentinel distinct from real order values.
+    df["avg_order_value"] = df["avg_order_value"].fillna(-1)
 
     is_validation = df["cutoff_date"].isin(validation_cutoffs)
     is_test = df["cutoff_date"].isin(test_cutoffs)
     is_train = ~(is_validation | is_test)
 
-    X_train = X.loc[is_train].copy()
-    y_train = y.loc[is_train].copy()
+    train_df = df.loc[is_train].copy()
+    val_df = df.loc[is_validation].copy()
+    test_df = df.loc[is_test].copy()
 
-    X_val = X.loc[is_validation].copy()
-    y_val = y.loc[is_validation].copy()
-
-    X_test = X.loc[is_test].copy()
-    y_test = y.loc[is_test].copy()
-
-    return (
-        X_train,
-        X_val,
-        X_test,
-        y_train,
-        y_val,
-        y_test,
-    )
+    return train_df, val_df, test_df
 
 def evaluate_model(model, X, y, model_name: str) -> dict:
     """
@@ -224,10 +273,42 @@ ALL_CUTOFFS = pd.date_range(
     tz="UTC",
 )
 
-VALIDATION_CUTOFFS = list(ALL_CUTOFFS[-4:-2])
-TEST_CUTOFFS = list(ALL_CUTOFFS[-2:])
+# Purged / embargoed temporal split.
+#
+# Train:
+#   Oct 4 label -> Oct 4-11
+#   Oct 6 label -> Oct 6-13
+#   Oct 8 label -> Oct 8-15
+#
+# Validation:
+#   Oct 16 label -> Oct 16-23
+#
+# Test:
+#   Oct 24 label -> Oct 24-31
+#
+# The unused cutoffs act as an embargo so label windows
+# do not overlap across train / validation / test.
+TRAIN_CUTOFFS = [
+    ALL_CUTOFFS[0],   # Oct 4
+    ALL_CUTOFFS[1],   # Oct 6
+    ALL_CUTOFFS[2],   # Oct 8
+]
+
+VALIDATION_CUTOFFS = [
+    ALL_CUTOFFS[6],   # Oct 16
+]
+
+TEST_CUTOFFS = [
+    ALL_CUTOFFS[10],  # Oct 24
+]
+
 
 if __name__ == "__main__":
+
+    print(
+        "Train cutoffs:",
+        [str(c.date()) for c in TRAIN_CUTOFFS],
+    )
 
     print(
         "Validation cutoffs:",
@@ -239,220 +320,551 @@ if __name__ == "__main__":
         [str(c.date()) for c in TEST_CUTOFFS],
     )
 
-    (
-        X_train,
-        X_val,
-        X_test,
-        y_train,
-        y_val,
-        y_test,
-    ) = load_and_split_by_cutoff(
-        DATA_DIR / "user_features.parquet",
-        VALIDATION_CUTOFFS,
-        TEST_CUTOFFS,
+    # =========================================================
+    # LOAD DATA
+    # =========================================================
+
+    df = pd.read_parquet(
+        DATA_DIR / "user_features.parquet"
     )
+
+    # Users with no previous orders have undefined AOV.
+    # Use -1 as a sentinel so this remains distinguishable
+    # from a real zero-dollar value.
+    df["avg_order_value"] = (
+        df["avg_order_value"].fillna(-1)
+    )
+
+    # =========================================================
+    # PURGED TEMPORAL SPLIT
+    # =========================================================
+
+    is_train = df["cutoff_date"].isin(
+        TRAIN_CUTOFFS
+    )
+
+    is_validation = df["cutoff_date"].isin(
+        VALIDATION_CUTOFFS
+    )
+
+    is_test = df["cutoff_date"].isin(
+        TEST_CUTOFFS
+    )
+
+    train_df = df.loc[is_train].copy()
+    val_df = df.loc[is_validation].copy()
+    test_df = df.loc[is_test].copy()
+
+    # Labels
+    y_train = train_df[
+        LABEL_COL
+    ].astype(int)
+
+    y_val = val_df[
+        LABEL_COL
+    ].astype(int)
+
+    y_test = test_df[
+        LABEL_COL
+    ].astype(int)
+
+    # =========================================================
+    # FEATURE MATRICES
+    # =========================================================
+
+    # -------------------------
+    # Core features
+    # -------------------------
+
+    X_train_core = train_df[
+        FEATURE_COLS_CORE
+    ].copy()
+
+    X_val_core = val_df[
+        FEATURE_COLS_CORE
+    ].copy()
+
+    # -------------------------
+    # Core + Engagement/Funnel
+    # -------------------------
+
+    X_train_core_engagement = train_df[
+        FEATURE_COLS_CORE_ENGAGEMENT
+    ].copy()
+
+    X_val_core_engagement = val_df[
+        FEATURE_COLS_CORE_ENGAGEMENT
+    ].copy()
+
+    # -------------------------
+    # Full structured set:
+    # Core + Engagement + Purchase History
+    # -------------------------
+
+    X_train_full = train_df[
+        FEATURE_COLS_FULL_STRUCTURED
+    ].copy()
+
+    X_val_full = val_df[
+        FEATURE_COLS_FULL_STRUCTURED
+    ].copy()
+
+    # FULL PRODUCT
+    X_train_full_product = train_df[
+        FEATURE_COLS_FULL_PLUS_PRODUCT
+    ]
+
+    X_val_full_product = val_df[
+        FEATURE_COLS_FULL_PLUS_PRODUCT
+    ]
+
+    # FULL PRODUCT SEMANTIC
+    X_train_full_product_semantic = train_df[
+        FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
+    ]
+
+    X_val_full_product_semantic = val_df[
+        FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
+    ]
+
+    # =========================================================
+    # DATA SPLIT SUMMARY
+    # =========================================================
 
     print("\n=== DATA SPLIT ===")
-    print(f"Train rows: {len(X_train):,}")
-    print(f"Validation rows: {len(X_val):,}")
-    print(f"Test rows: {len(X_test):,}")
 
-    print(f"Train positive rate: {y_train.mean():.4%}")
-    print(f"Validation positive rate: {y_val.mean():.4%}")
-    print(f"Test positive rate: {y_test.mean():.4%}")
-
-    print("\n=== LOGISTIC REGRESSION BASELINE ===")
-
-    scaler = StandardScaler()
-
-    # Learn scaling parameters from train only
-    X_train_scaled = scaler.fit_transform(X_train)
-    # Apply same scaling to validation and test
-    X_val_scaled = scaler.transform(X_val)
-    X_test_scaled = scaler.transform(X_test)
-
-
-    lr_model = LogisticRegression(
-        class_weight="balanced",
-        max_iter=1000,
-        random_state=38,
-    )
-
-    lr_model.fit(X_train_scaled, y_train)
-
-    lr_validation_results = evaluate_model(
-        lr_model,
-        X_val_scaled,
-        y_val,
-        "Logistic Regression — Validation",
-    )
-
-    print("\n=== LOGISTIC REGRESSION THRESHOLD SELECTION ===")
-
-    lr_threshold_result = find_best_threshold(
-        lr_model,
-        X_val_scaled,
-        y_val,
-    )
-
-    lr_best_threshold = float(
-        lr_threshold_result["best_threshold"]
+    print(
+        f"Train rows: {len(train_df):,}"
     )
 
     print(
-        f"Best Logistic Regression validation threshold: "
-        f"{lr_best_threshold:.4f}"
+        f"Validation rows: {len(val_df):,}"
     )
 
     print(
-        "Validation performance at selected threshold — "
-        f"precision: {lr_threshold_result['precision_at_best']:.4f}, "
-        f"recall: {lr_threshold_result['recall_at_best']:.4f}, "
-        f"f1: {lr_threshold_result['f1_at_best']:.4f}"
-    )
-
-    print("\n=== SCALE_POS_WEIGHT VALIDATION SWEEP ===")
-    # Evaluate different positive-class weights to address class imbalance. Model selection based only on validation PR-AUC
-    weight_candidates = [
-        1,
-        5,
-        10,
-        20,
-        50,
-        100,
-        115,
-    ]
-
-    validation_results = []
-
-    for w in weight_candidates:
-
-        model = fit_lightgbm_with_weight(
-            X_train,
-            y_train,
-            scale_pos_weight=w,
-        )
-
-        result = evaluate_model(
-            model,
-            X_val,
-            y_val,
-            f"LightGBM weight={w} — Validation",
-        )
-
-        result["scale_pos_weight"] = w
-        validation_results.append(result)
-
-    validation_df = pd.DataFrame(validation_results)
-
-    print("\n=== VALIDATION WEIGHT SUMMARY ===")
-
-    print(
-        validation_df[
-            [
-                "scale_pos_weight",
-                "roc_auc",
-                "pr_auc",
-                "precision",
-                "recall",
-                "f1",
-            ]
-        ]
-    )
-
-    best_row = validation_df.loc[
-        validation_df["pr_auc"].idxmax()
-    ]
-
-    best_weight = float(
-        best_row["scale_pos_weight"]
+        f"Test rows: {len(test_df):,}"
     )
 
     print(
-        f"\nBest validation scale_pos_weight by PR-AUC: "
-        f"{best_weight}"
+        f"Train positive rate: "
+        f"{y_train.mean():.4%}"
     )
 
-    best_model = fit_lightgbm_with_weight(
-        X_train,
+    print(
+        f"Validation positive rate: "
+        f"{y_val.mean():.4%}"
+    )
+
+    print(
+        f"Test positive rate: "
+        f"{y_test.mean():.4%}"
+    )
+
+    # =========================================================
+    # FEATURE ABLATION
+    # =========================================================
+
+    print("\n" + "=" * 70)
+    print(
+        "FEATURE ABLATION: "
+        "CORE -> ENGAGEMENT -> PURCHASE HISTORY -> PRODUCT/CATEGORY -> SEMANTIC"
+    )
+    print("=" * 70)
+
+    # =========================================================
+    # MODEL 1: CORE ONLY
+    # =========================================================
+
+    core_model = fit_lightgbm_with_weight(
+        X_train_core,
         y_train,
-        scale_pos_weight=best_weight,
+        scale_pos_weight=1,
     )
 
-    print("\n=== VALIDATION THRESHOLD TUNING ===")
-
-    lgbm_threshold_result = find_best_threshold(
-        best_model,
-        X_val,
-        y_val,
+    core_val_proba = (
+        core_model.predict_proba(
+            X_val_core
+        )[:, 1]
     )
 
-    lgbm_best_threshold = float(
-        lgbm_threshold_result["best_threshold"]
+    core_metrics = {
+        "model": "Core",
+        "n_features": len(
+            FEATURE_COLS_CORE
+        ),
+        "roc_auc": roc_auc_score(
+            y_val,
+            core_val_proba,
+        ),
+        "pr_auc": average_precision_score(
+            y_val,
+            core_val_proba,
+        ),
+    }
+
+    core_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            core_val_proba,
+            k=0.05,
+        )
     )
 
-    print(
-        f"Best validation threshold: "
-        f"{lgbm_best_threshold:.4f}"
+    # =========================================================
+    # MODEL 2: CORE + ENGAGEMENT
+    # =========================================================
+
+    engagement_model = (
+        fit_lightgbm_with_weight(
+            X_train_core_engagement,
+            y_train,
+            scale_pos_weight=1,
+        )
     )
 
-    print(
-        "At validation threshold — "
-        f"precision: {lgbm_threshold_result['precision_at_best']:.4f}, "
-        f"recall: {lgbm_threshold_result['recall_at_best']:.4f}, "
-        f"f1: {lgbm_threshold_result['f1_at_best']:.4f}"
+    engagement_val_proba = (
+        engagement_model.predict_proba(
+            X_val_core_engagement
+        )[:, 1]
     )
 
-    print("\n=== FINAL UNTOUCHED TEST EVALUATION ===")
+    engagement_metrics = {
+        "model": "Core + Engagement",
+        "n_features": len(
+            FEATURE_COLS_CORE_ENGAGEMENT
+        ),
+        "roc_auc": roc_auc_score(
+            y_val,
+            engagement_val_proba,
+        ),
+        "pr_auc": average_precision_score(
+            y_val,
+            engagement_val_proba,
+        ),
+    }
 
-    lr_test_results = evaluate_at_threshold(
-        lr_model,
-        X_test_scaled,
-        y_test,
-        lr_best_threshold,
-        "Logistic Regression — Test",
+    engagement_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            engagement_val_proba,
+            k=0.05,
+        )
     )
 
-    lgbm_test_results = evaluate_at_threshold(
-        best_model,
-        X_test,
-        y_test,
-        lgbm_best_threshold,
-        "LightGBM — Test",
+    # =========================================================
+    # MODEL 3:
+    # CORE + ENGAGEMENT + PURCHASE HISTORY
+    # =========================================================
+
+    full_model = fit_lightgbm_with_weight(
+        X_train_full,
+        y_train,
+        scale_pos_weight=1,
     )
 
-    validation_df.to_csv(
-        DATA_DIR / "weekly_validation_weight_results.csv",
-        index=False,
+    full_val_proba = (
+        full_model.predict_proba(
+            X_val_full
+        )[:, 1]
     )
 
-    final_comparison_df = pd.DataFrame([
-        lr_test_results,
-        lgbm_test_results,
+    full_metrics = {
+        "model":
+            "Core + Engagement + Purchase History",
+
+        "n_features": len(
+            FEATURE_COLS_FULL_STRUCTURED
+        ),
+
+        "roc_auc": roc_auc_score(
+            y_val,
+            full_val_proba,
+        ),
+
+        "pr_auc": average_precision_score(
+            y_val,
+            full_val_proba,
+        ),
+    }
+
+    full_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            full_val_proba,
+            k=0.05,
+        )
+    )
+
+        # =========================================================
+    # MODEL 4:
+    # FULL STRUCTURED + PRODUCT/CATEGORY
+    # =========================================================
+
+    full_product_model = fit_lightgbm_with_weight(
+        X_train_full_product,
+        y_train,
+        scale_pos_weight=1,
+    )
+
+    full_product_val_proba = (
+        full_product_model.predict_proba(
+            X_val_full_product
+        )[:, 1]
+    )
+
+    full_product_metrics = {
+        "model":
+            "Full Structured + Product/Category",
+
+        "n_features": len(
+            FEATURE_COLS_FULL_PLUS_PRODUCT
+        ),
+
+        "roc_auc": roc_auc_score(
+            y_val,
+            full_product_val_proba,
+        ),
+
+        "pr_auc": average_precision_score(
+            y_val,
+            full_product_val_proba,
+        ),
+    }
+
+    full_product_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            full_product_val_proba,
+            k=0.05,
+        )
+    )
+
+    # =========================================================
+    # MODEL 5:
+    # FULL STRUCTURED + PRODUCT/CATEGORY + SEMANTIC
+    # =========================================================
+
+    full_product_semantic_model = fit_lightgbm_with_weight(
+        X_train_full_product_semantic,
+        y_train,
+        scale_pos_weight=1,
+    )
+
+    full_product_semantic_val_proba = (
+        full_product_semantic_model.predict_proba(
+            X_val_full_product_semantic
+        )[:, 1]
+    )
+
+    full_product_semantic_metrics = {
+        "model":
+            "Full + Product/Category + Semantic",
+
+        "n_features": len(
+            FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
+        ),
+
+        "roc_auc": roc_auc_score(
+            y_val,
+            full_product_semantic_val_proba,
+        ),
+
+        "pr_auc": average_precision_score(
+            y_val,
+            full_product_semantic_val_proba,
+        ),
+    }
+
+    full_product_semantic_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            full_product_semantic_val_proba,
+            k=0.05,
+        )
+    )
+
+    # =========================================================
+    # BUILD COMPARISON TABLE
+    # =========================================================
+
+    ablation_df = pd.DataFrame([
+        core_metrics,
+        engagement_metrics,
+        full_metrics,
+        full_product_metrics,
+        full_product_semantic_metrics,
     ])
 
-    print("\n=== FINAL MODEL COMPARISON ===")
+    print(
+        "\n=== VALIDATION FEATURE ABLATION ==="
+    )
 
     comparison_cols = [
         "model",
+        "n_features",
         "roc_auc",
         "pr_auc",
-        "precision",
-        "recall",
-        "f1",
         "precision_at_5pct",
         "recall_at_5pct",
         "lift_at_5pct",
-        "threshold",
     ]
 
     print(
-        final_comparison_df[
+        ablation_df[
             comparison_cols
         ].to_string(index=False)
     )
 
-    final_comparison_df.to_csv(
-        DATA_DIR / "weekly_final_test_results.csv",
+    # =========================================================
+    # INCREMENTAL IMPROVEMENT
+    # =========================================================
+
+    core_pr = core_metrics[
+        "pr_auc"
+    ]
+
+    engagement_pr = engagement_metrics[
+        "pr_auc"
+    ]
+
+    full_pr = full_metrics[
+        "pr_auc"
+    ]
+
+    full_product_pr = full_product_metrics[
+        "pr_auc"
+    ]
+
+    semantic_pr = full_product_semantic_metrics[
+        "pr_auc"
+    ]
+
+
+    engagement_pr_change = (
+        (engagement_pr - core_pr)
+        / core_pr
+        * 100
+    )
+
+    purchase_history_pr_change = (
+        (full_pr - engagement_pr)
+        / engagement_pr
+        * 100
+    )
+
+    total_pr_change = (
+        (full_pr - core_pr)
+        / core_pr
+        * 100
+    )
+
+    product_pr_change = (
+        (full_product_pr - full_pr)
+        / full_pr
+        * 100
+    )
+
+
+    semantic_pr_change = (
+        (semantic_pr - full_product_pr)
+        / full_product_pr
+        * 100
+    )
+
+    print(
+        "\n=== INCREMENTAL PR-AUC IMPROVEMENT ==="
+    )
+
+    print(
+        "Core -> Core + Engagement: "
+        f"{engagement_pr_change:+.2f}%"
+    )
+
+    print(
+        "Core + Engagement -> "
+        "Full Structured: "
+        f"{purchase_history_pr_change:+.2f}%"
+    )
+
+    print(
+        "Core -> Full Structured: "
+        f"{total_pr_change:+.2f}%"
+    )
+
+    print(
+        "Full Structured -> "
+        "Full + Product/Category: "
+        f"{product_pr_change:+.2f}%"
+    )
+
+    print(
+        "Full + Product/Category -> "
+        "Full + Product/Category + Semantic: "
+        f"{semantic_pr_change:+.2f}%"
+    )
+
+    # =========================================================
+    # CURRENT VALIDATION CHAMPION
+    # =========================================================
+
+    best_idx = ablation_df[
+        "pr_auc"
+    ].idxmax()
+
+    best_feature_set = (
+        ablation_df.loc[
+            best_idx,
+            "model",
+        ]
+    )
+
+    best_pr_auc = (
+        ablation_df.loc[
+            best_idx,
+            "pr_auc",
+        ]
+    )
+
+    best_lift = (
+        ablation_df.loc[
+            best_idx,
+            "lift_at_5pct",
+        ]
+    )
+
+    print(
+        "\n=== CURRENT VALIDATION CHAMPION ==="
+    )
+
+    print(
+        f"Feature set: "
+        f"{best_feature_set}"
+    )
+
+    print(
+        f"PR-AUC: "
+        f"{best_pr_auc:.6f}"
+    )
+
+    print(
+        f"Lift@5%: "
+        f"{best_lift:.4f}x"
+    )
+
+    # =========================================================
+    # SAVE VALIDATION RESULTS
+    # =========================================================
+
+    ablation_df.to_csv(
+        DATA_DIR
+        / "weekly_feature_group_ablation.csv",
         index=False,
+    )
+
+    print(
+        "\nFeature-group ablation complete."
+    )
+
+    print(
+        "The final test set was NOT evaluated."
     )

@@ -30,20 +30,45 @@ def preprocess_text(text: str) -> str:
     tokens = [LEMMATIZER.lemmatize(t) for t in tokens]
     return " ".join(tokens)
 
-def vectorize_text(processed_texts: pd.Series, n_components: int = 80) -> np.ndarray:
-    """TF-IDF vectorize processed text, then reduce to n_components dense dimensions."""
-    # caps vocabulary to 500 most frequent/important words across all your category descriptions
-    # Chose 500 given the relatively small number of unique categories and their short descriptions, to avoid overfitting and keep the feature space manageable.
-    vectorizer = TfidfVectorizer(max_features=500)
-    # fit learns vocab and computes importance weights of each word, transform into numeric vector -> sparse matrix
-    tfidf_matrix = vectorizer.fit_transform(processed_texts)
+def vectorize_text(
+    processed_texts: pd.Series,
+    n_components: int = 20
+) -> np.ndarray:
+    """TF-IDF vectorize processed text, then reduce to dense dimensions."""
 
-    # reduce dimensionality to make easier to join onto feature tables 
-    svd = TruncatedSVD(n_components=n_components, random_state=38)
-    reduced = svd.fit_transform(tfidf_matrix)
+    vectorizer = TfidfVectorizer(
+        max_features=500
+    )
 
-    print(f"TF-IDF vocab size: {len(vectorizer.vocabulary_)}")
-    print(f"Explained variance (top {n_components} components): {svd.explained_variance_ratio_.sum():.2}")
+    tfidf_matrix = vectorizer.fit_transform(
+        processed_texts
+    )
+
+    max_components = min(
+        n_components,
+        tfidf_matrix.shape[0] - 1,
+        tfidf_matrix.shape[1] - 1,
+    )
+
+    svd = TruncatedSVD(
+        n_components=max_components,
+        random_state=38,
+    )
+
+    reduced = svd.fit_transform(
+        tfidf_matrix
+    )
+
+    print(
+        f"TF-IDF vocab size: "
+        f"{len(vectorizer.vocabulary_)}"
+    )
+
+    print(
+        f"Explained variance "
+        f"(top {max_components} components): "
+        f"{svd.explained_variance_ratio_.sum():.2f}"
+    )
 
     return reduced
 
@@ -122,8 +147,22 @@ if __name__ == "__main__":
     # list comprehension creates column names for each dimension of the vectorized text features
     vector_cols = [f"text_dim_{i}" for i in range(text_vectors.shape[1])]
     # raw NumPy array -> pandas DF, each row is a catefory with 20 numeric columns describing category's position in compressed text-embedding space
-    text_features_df = pd.DataFrame(text_vectors, columns=vector_cols)
-    # add category_code as first column to the text_features_df for readability
+    text_features_df = pd.DataFrame(
+    text_vectors,
+    columns=vector_cols
+)
 
-    print(text_features_df.head(10))
-    text_features_df.to_parquet(CATEGORY_TEXT_FEATURES_OUT, index=False)
+# Add category_code so the semantic vectors can be merged
+# back onto event/category data later.
+text_features_df.insert(
+    0,
+    "category_code",
+    categories,
+)
+
+print(text_features_df.head(10))
+
+text_features_df.to_parquet(
+    CATEGORY_TEXT_FEATURES_OUT,
+    index=False
+)

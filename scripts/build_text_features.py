@@ -20,6 +20,8 @@ CATEGORY_TEXT_FEATURES_OUT = DATA_DIR / "category_text_features.parquet"
 STOP_WORDS = set(stopwords.words("english"))
 # initialize lemmatizer for reducing words to their base form
 LEMMATIZER = WordNetLemmatizer()
+# only want to fit TF-IDF on events that occurred before this cutoff, to avoid data leakage
+TEXT_FIT_END = pd.Timestamp('2019-10-08", tx = "UTC")
 
 
 def preprocess_text(text: str) -> str:
@@ -31,23 +33,28 @@ def preprocess_text(text: str) -> str:
     return " ".join(tokens)
 
 def vectorize_text(
-    processed_texts: pd.Series,
-    n_components: int = 20
+    fit_texts: pd.Series,
+    all_texts: pd.Series,
+    n_components: int = 20,
 ) -> np.ndarray:
-    """TF-IDF vectorize processed text, then reduce to dense dimensions."""
+    """
+    Fit TF-IDF and SVD on training-period category text,
+    then transform all category descriptions.
+    """
 
     vectorizer = TfidfVectorizer(
         max_features=500
     )
 
-    tfidf_matrix = vectorizer.fit_transform(
-        processed_texts
+    # Learn vocabulary and IDF weights from training-period text only.
+    fit_tfidf = vectorizer.fit_transform(
+        fit_texts
     )
 
     max_components = min(
         n_components,
-        tfidf_matrix.shape[0] - 1,
-        tfidf_matrix.shape[1] - 1,
+        fit_tfidf.shape[0] - 1,
+        fit_tfidf.shape[1] - 1,
     )
 
     svd = TruncatedSVD(
@@ -55,8 +62,17 @@ def vectorize_text(
         random_state=38,
     )
 
-    reduced = svd.fit_transform(
-        tfidf_matrix
+    # Learn the latent text dimensions from training-period text only.
+    svd.fit(fit_tfidf)
+
+    # Apply the already-fitted TF-IDF representation to all categories.
+    all_tfidf = vectorizer.transform(
+        all_texts
+    )
+
+    # Apply the already-fitted SVD representation.
+    reduced = svd.transform(
+        all_tfidf
     )
 
     print(
@@ -122,9 +138,35 @@ def get_descriptions(categories: list[str]) -> dict:
     return cache
 
 if __name__ == "__main__":
-    # Load the sample parquet file and extract unique category codes
-    df = pd.read_parquet(SAMPLE_PARQUET, columns = ["category_code"])
-    categories = df["category_code"].fillna("unknown").unique().tolist()
+    # Load the sample parquet file and extract unique category codes and event time
+    df = pd.read_parquet(
+        SAMPLE_PARQUET,
+        columns=["event_time", "category_code"]
+    )
+
+    df["event_time"] = pd.to_datetime(
+        df["event_time"],
+        utc=True,
+    )
+
+    df["category_code"] = (
+        df["category_code"]
+        .fillna("unknown")
+    )
+    categories = (
+        df["category_code"]
+        .unique()
+        .tolist()
+    )
+
+    training_categories = (
+        df.loc[
+            df["event_time"] < TEXT_FIT_END,
+            "category_code",
+        ]
+        .unique()
+        .tolist()
+    )    
     print(f"{len(categories)} unique categories found.")
 
     # Generate or load cached descriptions for each category
@@ -134,6 +176,18 @@ if __name__ == "__main__":
     raw_text = pd.Series([descriptions[c] for c in categories])
     processed_text = raw_text.apply(preprocess_text)
 
+    training_raw_text = pd.Series(
+        [
+            descriptions[c]
+            for c in training_categories
+        ]
+    )
+
+    training_processed_text = (
+        training_raw_text.apply(
+            preprocess_text
+        )
+    )
     preview = pd.DataFrame({
         "category_code": categories,
         "raw_text": raw_text,
@@ -143,7 +197,11 @@ if __name__ == "__main__":
 
     # TF-IDF + dimensionality reduction
     # run processed category descriptions through TF_IDF, compressing result to n_components
-    text_vectors = vectorize_text(processed_text)
+    text_vectors = vectorize_text(
+        fit_texts=training_processed_text,
+        all_texts=processed_text,
+        n_components=20,
+    )
     # list comprehension creates column names for each dimension of the vectorized text features
     vector_cols = [f"text_dim_{i}" for i in range(text_vectors.shape[1])]
     # raw NumPy array -> pandas DF, each row is a catefory with 20 numeric columns describing category's position in compressed text-embedding space

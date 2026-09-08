@@ -619,3 +619,99 @@ if __name__ == "__main__":
     print(
         "The final Oct 24 test set was NOT evaluated."
     )
+
+    # -------------------------------------------------------------------------
+    # Baseline model comparison
+    # -------------------------------------------------------------------------
+    #
+    # Compare Logistic Regression and the untuned LightGBM baseline using
+    # the same frozen 23-feature specification and the same temporal
+    # train/validation split.
+    #
+    # This determines whether LightGBM provides enough incremental
+    # predictive value to justify its additional model complexity.
+    #
+    # The Oct 24 test set remains untouched.
+
+    FINAL_FEATURE_COLS = FEATURE_COLS_CORE_PURCHASE_PRODUCT
+
+    X_train_final = train_df[FINAL_FEATURE_COLS].copy()
+    X_val_final = val_df[FINAL_FEATURE_COLS].copy()
+
+    print("\nStage 13.5: Baseline model comparison")
+    print(f"Frozen feature count: {len(FINAL_FEATURE_COLS)}")
+
+
+    # Logistic Regression baseline
+    logistic_model = fit_logistic_regression(
+        X_train_final,
+        y_train,
+    )
+
+    logistic_metrics = evaluate_ranking_model(
+        model=logistic_model,
+        X=X_val_final,
+        y=y_val,
+        model_name="Logistic Regression",
+    )
+
+
+    # Untuned LightGBM baseline
+    lightgbm_model = fit_lightgbm_baseline(
+        X_train_final,
+        y_train,
+        scale_pos_weight=1.0,
+    )
+
+    lightgbm_metrics = evaluate_ranking_model(
+        model=lightgbm_model,
+        X=X_val_final,
+        y=y_val,
+        model_name="LightGBM",
+    )
+
+
+    baseline_results = pd.DataFrame(
+        [
+            logistic_metrics,
+            lightgbm_metrics,
+        ]
+    )
+
+    baseline_results["n_features"] = len(FINAL_FEATURE_COLS)
+
+    baseline_results = baseline_results[
+        [
+            "model",
+            "n_features",
+            "average_precision",
+            "roc_auc",
+            "precision_at_5pct",
+            "recall_at_5pct",
+            "lift_at_5pct",
+        ]
+    ]
+
+    baseline_results = baseline_results.sort_values(
+        "average_precision",
+        ascending=False,
+    ).reset_index(drop=True)
+
+    print("\nLogistic Regression vs LightGBM")
+    print(
+        baseline_results.to_string(
+            index=False
+        )
+    )
+
+    baseline_results.to_csv(
+        DATA_DIR / "baseline_model_comparison.csv",
+        index=False,
+    )
+
+    print(
+        "\nBaseline comparison complete."
+    )
+    print(
+        "The final Oct 24 test set was NOT evaluated."
+    )

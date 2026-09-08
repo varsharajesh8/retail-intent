@@ -2,20 +2,19 @@ from pathlib import Path
 
 import pandas as pd
 from lightgbm import LGBMClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    precision_recall_curve,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
-from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+# -----------------------------------------------------------------------------
+# Feature groups
+# -----------------------------------------------------------------------------
 
 FEATURE_COLS_CORE = [
     "recency_days",
@@ -45,17 +44,6 @@ FEATURE_COLS_PURCHASE_HISTORY = [
     "days_since_last_purchase",
 ]
 
-FEATURE_COLS_CORE_ENGAGEMENT = (
-    FEATURE_COLS_CORE
-    + FEATURE_COLS_ENGAGEMENT_ONLY
-)
-
-FEATURE_COLS_FULL_STRUCTURED = (
-    FEATURE_COLS_CORE
-    + FEATURE_COLS_ENGAGEMENT_ONLY
-    + FEATURE_COLS_PURCHASE_HISTORY
-)
-
 FEATURE_COLS_PRODUCT_CATEGORY = [
     "unique_products_viewed",
     "unique_categories_viewed",
@@ -71,121 +59,59 @@ FEATURE_COLS_PRODUCT_CATEGORY = [
     "price_range_viewed",
 ]
 
-FEATURE_COLS_FULL_PLUS_PRODUCT = (
-    FEATURE_COLS_FULL_STRUCTURED
-    + FEATURE_COLS_PRODUCT_CATEGORY
-)
-
 FEATURE_COLS_SEMANTIC = [
     f"user_text_dim_{i}"
     for i in range(20)
 ]
 
-FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC = (
-    FEATURE_COLS_FULL_PLUS_PRODUCT
+
+# Common combinations used in model development.
+FEATURE_COLS_CORE_ENGAGEMENT = (
+    FEATURE_COLS_CORE
+    + FEATURE_COLS_ENGAGEMENT_ONLY
+)
+
+FEATURE_COLS_CORE_PURCHASE = (
+    FEATURE_COLS_CORE
+    + FEATURE_COLS_PURCHASE_HISTORY
+)
+
+FEATURE_COLS_CORE_PRODUCT = (
+    FEATURE_COLS_CORE
+    + FEATURE_COLS_PRODUCT_CATEGORY
+)
+
+FEATURE_COLS_CORE_SEMANTIC = (
+    FEATURE_COLS_CORE
     + FEATURE_COLS_SEMANTIC
 )
+
 LABEL_COL = "will_purchase_next_7d"
 
 
-def evaluate_model(model, X, y, model_name: str) -> dict:
-    """
-    Evaluate ranking and default-threshold performance
-    on a supplied dataset.
-    """
-
-    y_pred = model.predict(X)
-    y_proba = model.predict_proba(X)[:, 1]
-
-    metrics = {
-        "model": model_name,
-        "roc_auc": roc_auc_score(y, y_proba),
-        "pr_auc": average_precision_score(y, y_proba),
-        "precision": precision_score(y, y_pred, zero_division=0),
-        "recall": recall_score(y, y_pred, zero_division=0),
-        "f1": f1_score(y, y_pred, zero_division=0),
-    }
-
-    print(f"\n--- {model_name} ---")
-
-    for k, v in metrics.items():
-        if k != "model":
-            print(f"{k}: {v:.4f}")
-
-    return metrics
-
-def find_best_threshold(model, X_val, y_val) -> dict:
-    """Sweep classification thresholds on validation data to find threshold maximizing F1."""
-    y_proba = model.predict_proba(X_val)[:, 1]
-    precisions, recalls, thresholds = precision_recall_curve(y_val, y_proba)
-    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
-    best_idx = f1_scores[:-1].argmax()
-
-    return {
-        "best_threshold": thresholds[best_idx],
-        "precision_at_best": precisions[best_idx],
-        "recall_at_best": recalls[best_idx],
-        "f1_at_best": f1_scores[best_idx],
-    }
-
-def evaluate_at_threshold(
-    model,
-    X,
-    y,
-    threshold: float,
-    model_name: str,
-) -> dict:
-    """
-    Evaluate using a threshold selected previously on validation data.
-    """
-
-    y_proba = model.predict_proba(X)[:, 1]
-    y_pred = (y_proba >= threshold).astype(int)
-
-    business_metrics = ranking_metrics_at_k(
-        y,
-        y_proba,
-        k=0.05,
-    )
-
-    metrics = {
-        "model": model_name,
-        "threshold": threshold,
-        "roc_auc": roc_auc_score(y, y_proba),
-        "pr_auc": average_precision_score(y, y_proba),
-        "precision": precision_score(y, y_pred, zero_division=0),
-        "recall": recall_score(y, y_pred, zero_division=0),
-        "f1": f1_score(y, y_pred, zero_division=0),
-    }
-
-    metrics.update(business_metrics)
-
-    print(f"\n--- {model_name} ---")
-
-    for k, v in metrics.items():
-        if k != "model":
-            print(f"{k}: {v:.4f}")
-
-    return metrics
-
+# -----------------------------------------------------------------------------
+# Metrics
+# -----------------------------------------------------------------------------
 
 def ranking_metrics_at_k(
     y_true,
-    y_proba,
+    y_score,
     k: float = 0.05,
 ) -> dict:
     """
     Evaluate the highest-scoring k fraction of users.
 
     Example:
-        k=0.05 evaluates the top 5% of users ranked
-        by predicted purchase propensity. useful when marketing can only target top k% of users.
+        k=0.05 evaluates the top 5% of users ranked by predicted
+        purchase propensity.
     """
 
-    results = pd.DataFrame({
-        "actual": pd.Series(y_true).reset_index(drop=True),
-        "score": y_proba,
-    })
+    results = pd.DataFrame(
+        {
+            "actual": pd.Series(y_true).reset_index(drop=True),
+            "score": y_score,
+        }
+    )
 
     results = results.sort_values(
         "score",
@@ -193,13 +119,11 @@ def ranking_metrics_at_k(
     )
 
     n_top = max(1, int(len(results) * k))
-
     top_k = results.head(n_top)
 
     precision_at_k = top_k["actual"].mean()
 
     total_positives = results["actual"].sum()
-
     if total_positives > 0:
         recall_at_k = (
             top_k["actual"].sum()
@@ -209,17 +133,23 @@ def ranking_metrics_at_k(
         recall_at_k = 0.0
 
     base_rate = results["actual"].mean()
-
     if base_rate > 0:
         lift_at_k = precision_at_k / base_rate
     else:
         lift_at_k = 0.0
 
+    pct = int(k * 100)
+
     return {
-        f"precision_at_{int(k * 100)}pct": precision_at_k,
-        f"recall_at_{int(k * 100)}pct": recall_at_k,
-        f"lift_at_{int(k * 100)}pct": lift_at_k,
+        f"precision_at_{pct}pct": precision_at_k,
+        f"recall_at_{pct}pct": recall_at_k,
+        f"lift_at_{pct}pct": lift_at_k,
     }
+
+
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
 
 def fit_logistic_regression(
     X_train,
@@ -237,7 +167,7 @@ def fit_logistic_regression(
                 "imputer",
                 SimpleImputer(
                     strategy="median",
-                    add_indicator=True, # add indicator for missingness as a feature
+                    add_indicator=True,
                 ),
             ),
             (
@@ -263,23 +193,125 @@ def fit_logistic_regression(
 
     return model
 
-def fit_lightgbm_with_weight(
+
+def fit_lightgbm_baseline(
     X_train,
     y_train,
-    scale_pos_weight: float,
+    scale_pos_weight: float = 1.0,
 ):
+    """
+    Fit the fixed LightGBM baseline used during feature ablation.
+
+    Hyperparameters stay fixed during ablation so performance changes
+    can be attributed to feature information rather than tuning changes.
+    """
+
     model = LGBMClassifier(
         n_estimators=200,
         learning_rate=0.05,
         max_depth=6,
+        num_leaves=31,
+        min_child_samples=20,
         scale_pos_weight=scale_pos_weight,
         random_state=38,
         verbose=-1,
     )
 
-    model.fit(X_train, y_train)
+    model.fit(
+        X_train,
+        y_train,
+    )
 
     return model
+
+
+def evaluate_ranking_model(
+    model,
+    X,
+    y,
+    model_name: str,
+) -> dict:
+    """
+    Evaluate a model using ranking-oriented validation metrics.
+    """
+
+    scores = model.predict_proba(X)[:, 1]
+
+    metrics = {
+        "model": model_name,
+        "roc_auc": roc_auc_score(y, scores),
+        "average_precision": average_precision_score(
+            y,
+            scores,
+        ),
+    }
+
+    metrics.update(
+        ranking_metrics_at_k(
+            y,
+            scores,
+            k=0.05,
+        )
+    )
+
+    return metrics
+
+
+# -----------------------------------------------------------------------------
+# Feature ablation
+# -----------------------------------------------------------------------------
+
+def run_feature_ablation(
+    train_df,
+    val_df,
+    y_train,
+    y_val,
+    feature_sets: dict,
+) -> pd.DataFrame:
+    """
+    Run feature-group ablation using the same fixed LightGBM baseline.
+    """
+
+    results = []
+
+    for model_name, feature_cols in feature_sets.items():
+        X_train = train_df[feature_cols].copy()
+        X_val = val_df[feature_cols].copy()
+
+        model = fit_lightgbm_baseline(
+            X_train,
+            y_train,
+            scale_pos_weight=1.0,
+        )
+
+        metrics = evaluate_ranking_model(
+            model=model,
+            X=X_val,
+            y=y_val,
+            model_name=model_name,
+        )
+
+        metrics["n_features"] = len(feature_cols)
+        results.append(metrics)
+
+    results_df = pd.DataFrame(results)
+
+    ordered_cols = [
+        "model",
+        "n_features",
+        "average_precision",
+        "roc_auc",
+        "precision_at_5pct",
+        "recall_at_5pct",
+        "lift_at_5pct",
+    ]
+
+    return results_df[ordered_cols]
+
+
+# -----------------------------------------------------------------------------
+# Temporal split
+# -----------------------------------------------------------------------------
 
 ALL_CUTOFFS = pd.date_range(
     "2019-10-04",
@@ -290,27 +322,28 @@ ALL_CUTOFFS = pd.date_range(
 
 # Purged / embargoed temporal split.
 #
-# Train:
-#   Oct 4 label -> Oct 4-11
-#   Oct 6 label -> Oct 6-13
-#   Oct 8 label -> Oct 8-15
+# Train label windows:
+#   Oct 4  -> [Oct 4, Oct 11)
+#   Oct 6  -> [Oct 6, Oct 13)
+#   Oct 8  -> [Oct 8, Oct 15)
 #
-# Validation:
-#   Oct 16 label -> Oct 16-23
+# Validation label window:
+#   Oct 16 -> [Oct 16, Oct 23)
 #
-# Test:
-#   Oct 24 label -> Oct 24-31
+# Test label window:
+#   Oct 24 -> [Oct 24, Oct 31)
 #
-# The unused cutoffs act as an embargo so label windows
-# do not overlap across train / validation / test.
+# Intermediate cutoffs are intentionally unused so target windows do
+# not overlap across train, validation, and test partitions.
+
 TRAIN_CUTOFFS = [
-    ALL_CUTOFFS[0],   # Oct 4
-    ALL_CUTOFFS[1],   # Oct 6
-    ALL_CUTOFFS[2],   # Oct 8
+    ALL_CUTOFFS[0],  # Oct 4
+    ALL_CUTOFFS[1],  # Oct 6
+    ALL_CUTOFFS[2],  # Oct 8
 ]
 
 VALIDATION_CUTOFFS = [
-    ALL_CUTOFFS[6],   # Oct 16
+    ALL_CUTOFFS[6],  # Oct 16
 ]
 
 TEST_CUTOFFS = [
@@ -318,8 +351,11 @@ TEST_CUTOFFS = [
 ]
 
 
-if __name__ == "__main__":
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 
+if __name__ == "__main__":
     print(
         "Train cutoffs:",
         [str(c.date()) for c in TRAIN_CUTOFFS],
@@ -335,25 +371,19 @@ if __name__ == "__main__":
         [str(c.date()) for c in TEST_CUTOFFS],
     )
 
-    # =========================================================
-    # LOAD DATA
-    # =========================================================
-
+    # Load the user-cutoff feature table.
     df = pd.read_parquet(
         DATA_DIR / "user_features.parquet"
     )
 
-    # Users with no previous orders have undefined AOV.
-    # Use -1 as a sentinel so this remains distinguishable
-    # from a real zero-dollar value.
+    # Users with no previous purchase-containing sessions have undefined
+    # average order value. Keep a sentinel value for model-development
+    # consistency. We will revisit missing-value handling before final tuning.
     df["avg_order_value"] = (
         df["avg_order_value"].fillna(-1)
     )
 
-    # =========================================================
-    # PURGED TEMPORAL SPLIT
-    # =========================================================
-
+    # Explicit cutoff membership preserves the embargo dates.
     is_train = df["cutoff_date"].isin(
         TRAIN_CUTOFFS
     )
@@ -370,650 +400,222 @@ if __name__ == "__main__":
     val_df = df.loc[is_validation].copy()
     test_df = df.loc[is_test].copy()
 
-    # Labels
-    y_train = train_df[
-        LABEL_COL
-    ].astype(int)
+    y_train = train_df[LABEL_COL].astype(int)
+    y_val = val_df[LABEL_COL].astype(int)
 
-    y_val = val_df[
-        LABEL_COL
-    ].astype(int)
-
-   
-
-    # =========================================================
-    # FEATURE MATRICES
-    # =========================================================
-
-    # -------------------------
-    # Core features
-    # -------------------------
-
-    X_train_core = train_df[
-        FEATURE_COLS_CORE
-    ].copy()
-
-    X_val_core = val_df[
-        FEATURE_COLS_CORE
-    ].copy()
-
-    # -------------------------
-    # Core + Engagement/Funnel
-    # -------------------------
-
-    X_train_core_engagement = train_df[
-        FEATURE_COLS_CORE_ENGAGEMENT
-    ].copy()
-
-    X_val_core_engagement = val_df[
-        FEATURE_COLS_CORE_ENGAGEMENT
-    ].copy()
-
-    # -------------------------
-    # Full structured set:
-    # Core + Engagement + Purchase History
-    # -------------------------
-
-    X_train_full = train_df[
-        FEATURE_COLS_FULL_STRUCTURED
-    ].copy()
-
-    X_val_full = val_df[
-        FEATURE_COLS_FULL_STRUCTURED
-    ].copy()
-
-    # FULL PRODUCT
-    X_train_full_product = train_df[
-        FEATURE_COLS_FULL_PLUS_PRODUCT
-    ]
-
-    X_val_full_product = val_df[
-        FEATURE_COLS_FULL_PLUS_PRODUCT
-    ]
-
-    # FULL PRODUCT SEMANTIC
-    X_train_full_product_semantic = train_df[
-        FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
-    ]
-
-    X_val_full_product_semantic = val_df[
-        FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
-    ]
-
-    # =========================================================
-    # DATA SPLIT SUMMARY
-    # =========================================================
-
-    print("\n=== DATA SPLIT ===")
-
-    print(
-        f"Train rows: {len(train_df):,}"
-    )
-
-    print(
-        f"Validation rows: {len(val_df):,}"
-    )
-
-    print(
-        f"Test rows: {len(test_df):,}"
-    )
-
+    print("\nData split")
+    print(f"Train rows: {len(train_df):,}")
+    print(f"Validation rows: {len(val_df):,}")
+    print(f"Reserved test rows: {len(test_df):,}")
     print(
         f"Train positive rate: "
         f"{y_train.mean():.4%}"
     )
-
     print(
         f"Validation positive rate: "
         f"{y_val.mean():.4%}"
     )
-
-
-    # =========================================================
-    # FEATURE ABLATION
-    # =========================================================
-
-    print("\n" + "=" * 70)
     print(
-        "FEATURE ABLATION: "
-        "CORE -> ENGAGEMENT -> PURCHASE HISTORY -> PRODUCT/CATEGORY -> SEMANTIC"
-    )
-    print("=" * 70)
-
-    # =========================================================
-    # MODEL 1: CORE ONLY
-    # =========================================================
-
-    core_model = fit_lightgbm_with_weight(
-        X_train_core,
-        y_train,
-        scale_pos_weight=1,
+        "Reserved Oct 24 test labels are not inspected "
+        "during model development."
     )
 
-    core_val_proba = (
-        core_model.predict_proba(
-            X_val_core
-        )[:, 1]
-    )
+    # -------------------------------------------------------------------------
+    # Phase A: Marginal feature-group value
+    # -------------------------------------------------------------------------
+    #
+    # Each optional feature family is added separately to Core.
+    # This answers whether each information source adds signal beyond Core
+    # without assuming Engagement must be included before Purchase History,
+    # Product/Category, or Semantic features are tested.
 
-    core_metrics = {
-        "model": "Core",
-        "n_features": len(
-            FEATURE_COLS_CORE
-        ),
-        "roc_auc": roc_auc_score(
-            y_val,
-            core_val_proba,
-        ),
-        "pr_auc": average_precision_score(
-            y_val,
-            core_val_proba,
-        ),
+    PHASE_A_FEATURE_SETS = {
+        "Core": FEATURE_COLS_CORE,
+        "Core + Engagement": FEATURE_COLS_CORE_ENGAGEMENT,
+        "Core + Purchase History": FEATURE_COLS_CORE_PURCHASE,
+        "Core + Product/Category": FEATURE_COLS_CORE_PRODUCT,
+        "Core + Semantic": FEATURE_COLS_CORE_SEMANTIC,
     }
 
-    core_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            core_val_proba,
-            k=0.05,
+    print("\nPhase A: Marginal feature-group ablation")
+
+    phase_a_results = run_feature_ablation(
+        train_df=train_df,
+        val_df=val_df,
+        y_train=y_train,
+        y_val=y_val,
+        feature_sets=PHASE_A_FEATURE_SETS,
+    )
+
+    phase_a_results = phase_a_results.sort_values(
+        "average_precision",
+        ascending=False,
+    ).reset_index(drop=True)
+
+    print(
+        phase_a_results.to_string(
+            index=False
         )
     )
 
-    # =========================================================
-    # MODEL 2: CORE + ENGAGEMENT
-    # =========================================================
-
-    engagement_model = (
-        fit_lightgbm_with_weight(
-            X_train_core_engagement,
-            y_train,
-            scale_pos_weight=1,
-        )
+    phase_a_results.to_csv(
+        DATA_DIR / "phase_a_feature_ablation.csv",
+        index=False,
     )
 
-    engagement_val_proba = (
-        engagement_model.predict_proba(
-            X_val_core_engagement
-        )[:, 1]
-    )
+    best_phase_a = phase_a_results.iloc[0]
 
-    engagement_metrics = {
-        "model": "Core + Engagement",
-        "n_features": len(
-            FEATURE_COLS_CORE_ENGAGEMENT
-        ),
-        "roc_auc": roc_auc_score(
-            y_val,
-            engagement_val_proba,
-        ),
-        "pr_auc": average_precision_score(
-            y_val,
-            engagement_val_proba,
-        ),
-    }
-
-    engagement_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            engagement_val_proba,
-            k=0.05,
-        )
-    )
-
-    # =========================================================
-    # MODEL 3:
-    # CORE + ENGAGEMENT + PURCHASE HISTORY
-    # =========================================================
-
-    full_model = fit_lightgbm_with_weight(
-        X_train_full,
-        y_train,
-        scale_pos_weight=1,
-    )
-
-    full_val_proba = (
-        full_model.predict_proba(
-            X_val_full
-        )[:, 1]
-    )
-
-    full_metrics = {
-        "model":
-            "Core + Engagement + Purchase History",
-
-        "n_features": len(
-            FEATURE_COLS_FULL_STRUCTURED
-        ),
-
-        "roc_auc": roc_auc_score(
-            y_val,
-            full_val_proba,
-        ),
-
-        "pr_auc": average_precision_score(
-            y_val,
-            full_val_proba,
-        ),
-    }
-
-    full_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            full_val_proba,
-            k=0.05,
-        )
-    )
-
-        # =========================================================
-    # MODEL 4:
-    # FULL STRUCTURED + PRODUCT/CATEGORY
-    # =========================================================
-
-    full_product_model = fit_lightgbm_with_weight(
-        X_train_full_product,
-        y_train,
-        scale_pos_weight=1,
-    )
-
-    full_product_val_proba = (
-        full_product_model.predict_proba(
-            X_val_full_product
-        )[:, 1]
-    )
-
-    full_product_metrics = {
-        "model":
-            "Full Structured + Product/Category",
-
-        "n_features": len(
-            FEATURE_COLS_FULL_PLUS_PRODUCT
-        ),
-
-        "roc_auc": roc_auc_score(
-            y_val,
-            full_product_val_proba,
-        ),
-
-        "pr_auc": average_precision_score(
-            y_val,
-            full_product_val_proba,
-        ),
-    }
-
-    full_product_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            full_product_val_proba,
-            k=0.05,
-        )
-    )
-
-    # =========================================================
-    # MODEL 5:
-    # FULL STRUCTURED + PRODUCT/CATEGORY + SEMANTIC
-    # =========================================================
-
-    full_product_semantic_model = fit_lightgbm_with_weight(
-        X_train_full_product_semantic,
-        y_train,
-        scale_pos_weight=1,
-    )
-
-    full_product_semantic_val_proba = (
-        full_product_semantic_model.predict_proba(
-            X_val_full_product_semantic
-        )[:, 1]
-    )
-
-    full_product_semantic_metrics = {
-        "model":
-            "Full + Product/Category + Semantic",
-
-        "n_features": len(
-            FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
-        ),
-
-        "roc_auc": roc_auc_score(
-            y_val,
-            full_product_semantic_val_proba,
-        ),
-
-        "pr_auc": average_precision_score(
-            y_val,
-            full_product_semantic_val_proba,
-        ),
-    }
-
-    full_product_semantic_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            full_product_semantic_val_proba,
-            k=0.05,
-        )
-    )
-
-    # =========================================================
-    # BUILD COMPARISON TABLE
-    # =========================================================
-
-    ablation_df = pd.DataFrame([
-        core_metrics,
-        engagement_metrics,
-        full_metrics,
-        full_product_metrics,
-        full_product_semantic_metrics,
-    ])
-
+    print("\nBest Phase A candidate")
+    print(f"Feature set: {best_phase_a['model']}")
     print(
-        "\n=== VALIDATION FEATURE ABLATION ==="
+        f"Average Precision: "
+        f"{best_phase_a['average_precision']:.6f}"
     )
-
-    comparison_cols = [
-        "model",
-        "n_features",
-        "roc_auc",
-        "pr_auc",
-        "precision_at_5pct",
-        "recall_at_5pct",
-        "lift_at_5pct",
-    ]
-
-    print(
-        ablation_df[
-            comparison_cols
-        ].to_string(index=False)
-    )
-
-    # =========================================================
-    # INCREMENTAL IMPROVEMENT
-    # =========================================================
-
-    core_pr = core_metrics[
-        "pr_auc"
-    ]
-
-    engagement_pr = engagement_metrics[
-        "pr_auc"
-    ]
-
-    full_pr = full_metrics[
-        "pr_auc"
-    ]
-
-    full_product_pr = full_product_metrics[
-        "pr_auc"
-    ]
-
-    semantic_pr = full_product_semantic_metrics[
-        "pr_auc"
-    ]
-
-
-    engagement_pr_change = (
-        (engagement_pr - core_pr)
-        / core_pr
-        * 100
-    )
-
-    purchase_history_pr_change = (
-        (full_pr - engagement_pr)
-        / engagement_pr
-        * 100
-    )
-
-    total_pr_change = (
-        (full_pr - core_pr)
-        / core_pr
-        * 100
-    )
-
-    product_pr_change = (
-        (full_product_pr - full_pr)
-        / full_pr
-        * 100
-    )
-
-
-    semantic_pr_change = (
-        (semantic_pr - full_product_pr)
-        / full_product_pr
-        * 100
-    )
-
-    print(
-        "\n=== INCREMENTAL PR-AUC IMPROVEMENT ==="
-    )
-
-    print(
-        "Core -> Core + Engagement: "
-        f"{engagement_pr_change:+.2f}%"
-    )
-
-    print(
-        "Core + Engagement -> "
-        "Full Structured: "
-        f"{purchase_history_pr_change:+.2f}%"
-    )
-
-    print(
-        "Core -> Full Structured: "
-        f"{total_pr_change:+.2f}%"
-    )
-
-    print(
-        "Full Structured -> "
-        "Full + Product/Category: "
-        f"{product_pr_change:+.2f}%"
-    )
-
-    print(
-        "Full + Product/Category -> "
-        "Full + Product/Category + Semantic: "
-        f"{semantic_pr_change:+.2f}%"
-    )
-
-    # =========================================================
-    # CURRENT VALIDATION CHAMPION
-    # =========================================================
-
-    best_idx = ablation_df[
-        "pr_auc"
-    ].idxmax()
-
-    # chosen based on LightGBM validation performance, so not using for logistic regression
-    
-    best_feature_set = (
-        ablation_df.loc[
-            best_idx,
-            "model",
-        ]
-    )
-
-    best_pr_auc = (
-        ablation_df.loc[
-            best_idx,
-            "pr_auc",
-        ]
-    )
-
-    best_lift = (
-        ablation_df.loc[
-            best_idx,
-            "lift_at_5pct",
-        ]
-    )
-
-    print(
-        "\n=== CURRENT VALIDATION CHAMPION ==="
-    )
-
-    print(
-        f"Feature set: "
-        f"{best_feature_set}"
-    )
-
-    print(
-        f"PR-AUC: "
-        f"{best_pr_auc:.6f}"
-    )
-
     print(
         f"Lift@5%: "
-        f"{best_lift:.4f}x"
+        f"{best_phase_a['lift_at_5pct']:.4f}x"
     )
 
-
-    # =========================================================
-    # MODEL BASELINE COMPARISON
-    # LOGISTIC REGRESSION VS LIGHTGBM
-    # =========================================================
 
     print(
-        "\n=== VALIDATION MODEL COMPARISON ==="
+        "\nPhase A complete. "
+    )
+    print(
+        "The final Oct 24 test set was NOT evaluated."
     )
 
-    # Use the same predefined candidate feature set for both
-    # models so the algorithm is the main difference.
-    comparison_feature_cols = (
-        FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
+
+    # -----------------------------------------------------------------------------
+    # Phase B feature combinations
+    # -----------------------------------------------------------------------------
+
+    # Phase A showed that Purchase History had the strongest
+    # marginal contribution beyond the Core features.
+    #
+    # Phase B therefore keeps Core + Purchase History as the
+    # common reference and adds each remaining feature group
+    # separately.
+    #
+    # This tests conditional value:
+    # Does the group still add useful information once purchase
+    # history is already known?
+
+
+    def combine_features(*groups):
+        """
+        Combine feature lists while preserving their original order
+        and avoiding duplicate feature names.
+        """
+        combined = []
+
+        for group in groups:
+            for feature in group:
+                if feature not in combined:
+                    combined.append(feature)
+
+        return combined
+
+
+    FEATURE_COLS_CORE_PURCHASE_ENGAGEMENT = combine_features(
+        FEATURE_COLS_CORE,
+        FEATURE_COLS_PURCHASE_HISTORY,
+        FEATURE_COLS_ENGAGEMENT_ONLY,
     )
 
-    X_train_comparison = train_df[
-        comparison_feature_cols
-    ].copy()
-
-    X_val_comparison = val_df[
-        comparison_feature_cols
-    ].copy()
-
-
-    # ---------------------------------------------------------
-    # LOGISTIC REGRESSION
-    # ---------------------------------------------------------
-
-    logistic_model = fit_logistic_regression(
-        X_train_comparison,
-        y_train,
+    FEATURE_COLS_CORE_PURCHASE_PRODUCT = combine_features(
+        FEATURE_COLS_CORE,
+        FEATURE_COLS_PURCHASE_HISTORY,
+        FEATURE_COLS_PRODUCT_CATEGORY,
     )
 
-    logistic_val_score = (
-        logistic_model.predict_proba(
-            X_val_comparison
-        )[:, 1]
+    FEATURE_COLS_CORE_PURCHASE_SEMANTIC = combine_features(
+        FEATURE_COLS_CORE,
+        FEATURE_COLS_PURCHASE_HISTORY,
+        FEATURE_COLS_SEMANTIC,
     )
 
-    logistic_metrics = {
-        "model": "Logistic Regression",
-        "n_features": len(
-            comparison_feature_cols
-        ),
-        "roc_auc": roc_auc_score(
-            y_val,
-            logistic_val_score,
-        ),
-        "pr_auc": average_precision_score(
-            y_val,
-            logistic_val_score,
-        ),
+    # After seeing phase B results, want to test core + purchase history + engagement + product/category 
+    FEATURE_COLS_CORE_PURCHASE_ENGAGEMENT_PRODUCT = (
+        FEATURE_COLS_CORE
+        + FEATURE_COLS_PURCHASE_HISTORY
+        + FEATURE_COLS_ENGAGEMENT_ONLY
+        + FEATURE_COLS_PRODUCT_CATEGORY
+    )
+
+
+    # -----------------------------------------------------------------------------
+    # Phase B: Conditional feature-group ablation
+    # -----------------------------------------------------------------------------
+
+    PHASE_B_FEATURE_SETS = {
+        "Core + Purchase History": FEATURE_COLS_CORE_PURCHASE,
+        "Core + Purchase + Engagement":
+            FEATURE_COLS_CORE_PURCHASE_ENGAGEMENT,
+        "Core + Purchase + Product/Category":
+            FEATURE_COLS_CORE_PURCHASE_PRODUCT,
+        "Core + Purchase + Semantic":
+            FEATURE_COLS_CORE_PURCHASE_SEMANTIC,
+        "Core + Purchase + Engagement + Product/Category":
+            FEATURE_COLS_CORE_PURCHASE_ENGAGEMENT_PRODUCT,
     }
 
-    logistic_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            logistic_val_score,
-            k=0.05,
-        )
+    print("\nPhase B: Conditional feature-group ablation")
+
+    phase_b_results = run_feature_ablation(
+        train_df=train_df,
+        val_df=val_df,
+        y_train=y_train,
+        y_val=y_val,
+        feature_sets=PHASE_B_FEATURE_SETS,
     )
 
-
-    # ---------------------------------------------------------
-    # LIGHTGBM
-    # ---------------------------------------------------------
-
-    lightgbm_baseline_model = (
-        fit_lightgbm_with_weight(
-            X_train_comparison,
-            y_train,
-            scale_pos_weight=1,
-        )
-    )
-
-    lightgbm_val_score = (
-        lightgbm_baseline_model.predict_proba(
-            X_val_comparison
-        )[:, 1]
-    )
-
-    lightgbm_baseline_metrics = {
-        "model": "LightGBM",
-        "n_features": len(
-            comparison_feature_cols
-        ),
-        "roc_auc": roc_auc_score(
-            y_val,
-            lightgbm_val_score,
-        ),
-        "pr_auc": average_precision_score(
-            y_val,
-            lightgbm_val_score,
-        ),
-    }
-
-    lightgbm_baseline_metrics.update(
-        ranking_metrics_at_k(
-            y_val,
-            lightgbm_val_score,
-            k=0.05,
-        )
-    )
-
-
-    # ---------------------------------------------------------
-    # COMPARISON TABLE
-    # ---------------------------------------------------------
-
-    model_comparison_df = pd.DataFrame(
-        [
-            logistic_metrics,
-            lightgbm_baseline_metrics,
-        ]
-    )
-
-    model_comparison_cols = [
-        "model",
-        "n_features",
-        "roc_auc",
-        "pr_auc",
-        "precision_at_5pct",
-        "recall_at_5pct",
-        "lift_at_5pct",
-    ]
+    phase_b_results = phase_b_results.sort_values(
+        "average_precision",
+        ascending=False,
+    ).reset_index(drop=True)
 
     print(
-        model_comparison_df[
-            model_comparison_cols
-        ].to_string(index=False)
+        phase_b_results.to_string(
+            index=False
+        )
     )
 
-    model_comparison_df.to_csv(
-        DATA_DIR
-        / "weekly_model_comparison.csv",
-        index=False,
-    )
-    # =========================================================
-    # SAVE VALIDATION RESULTS
-    # =========================================================
-
-    ablation_df.to_csv(
-        DATA_DIR
-        / "weekly_feature_group_ablation.csv",
+    phase_b_results.to_csv(
+        DATA_DIR / "phase_b_feature_ablation.csv",
         index=False,
     )
 
+    best_phase_b = phase_b_results.iloc[0]
+
+    print("\nBest Phase B candidate")
+
     print(
-        "\nFeature-group ablation complete."
+        f"Feature set: {best_phase_b['model']}"
     )
 
     print(
-        "The final test set was NOT evaluated."
+        "Average Precision: "
+        f"{best_phase_b['average_precision']:.6f}"
+    )
+
+    print(
+        "Lift@5%: "
+        f"{best_phase_b['lift_at_5pct']:.4f}x"
+    )
+
+    print(
+        "\nPhase B complete."
+    )
+
+    print(
+        "Review phase_b_feature_ablation.csv before "
+        "testing any larger combined feature set."
+    )
+
+    print(
+        "Do NOT run hyperparameter tuning yet."
+    )
+
+    print(
+        "The final Oct 24 test set was NOT evaluated."
     )

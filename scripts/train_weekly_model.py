@@ -12,6 +12,8 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -85,35 +87,6 @@ FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC = (
 )
 LABEL_COL = "will_purchase_next_7d"
 
-
-def load_and_split_by_cutoff(
-    path: Path,
-    validation_cutoffs: list,
-    test_cutoffs: list,
-) -> tuple:
-    """
-    Split the user-cutoff dataset chronologically into
-    train, validation, and test sets.
-
-    Feature columns are selected later so that different
-    feature sets can be compared on the exact same rows.
-    """
-
-    df = pd.read_parquet(path)
-
-    # avg_order_value is NaN for users with no prior orders.
-    # Use -1 as a sentinel distinct from real order values.
-    df["avg_order_value"] = df["avg_order_value"].fillna(-1)
-
-    is_validation = df["cutoff_date"].isin(validation_cutoffs)
-    is_test = df["cutoff_date"].isin(test_cutoffs)
-    is_train = ~(is_validation | is_test)
-
-    train_df = df.loc[is_train].copy()
-    val_df = df.loc[is_validation].copy()
-    test_df = df.loc[is_test].copy()
-
-    return train_df, val_df, test_df
 
 def evaluate_model(model, X, y, model_name: str) -> dict:
     """
@@ -248,6 +221,48 @@ def ranking_metrics_at_k(
         f"lift_at_{int(k * 100)}pct": lift_at_k,
     }
 
+def fit_logistic_regression(
+    X_train,
+    y_train,
+):
+    """
+    Fit the Logistic Regression baseline.
+
+    All preprocessing is learned from the training data only.
+    """
+
+    model = Pipeline(
+        steps=[
+            (
+                "imputer",
+                SimpleImputer(
+                    strategy="median",
+                    add_indicator=True, # add indicator for missingness as a feature
+                ),
+            ),
+            (
+                "scaler",
+                StandardScaler(),
+            ),
+            (
+                "classifier",
+                LogisticRegression(
+                    max_iter=1000,
+                    solver="lbfgs",
+                    class_weight=None,
+                    random_state=38,
+                ),
+            ),
+        ]
+    )
+
+    model.fit(
+        X_train,
+        y_train,
+    )
+
+    return model
+
 def fit_lightgbm_with_weight(
     X_train,
     y_train,
@@ -364,9 +379,7 @@ if __name__ == "__main__":
         LABEL_COL
     ].astype(int)
 
-    y_test = test_df[
-        LABEL_COL
-    ].astype(int)
+   
 
     # =========================================================
     # FEATURE MATRICES
@@ -455,10 +468,6 @@ if __name__ == "__main__":
         f"{y_val.mean():.4%}"
     )
 
-    print(
-        f"Test positive rate: "
-        f"{y_test.mean():.4%}"
-    )
 
     # =========================================================
     # FEATURE ABLATION
@@ -811,6 +820,8 @@ if __name__ == "__main__":
         "pr_auc"
     ].idxmax()
 
+    # chosen based on LightGBM validation performance, so not using for logistic regression
+    
     best_feature_set = (
         ablation_df.loc[
             best_idx,
@@ -851,6 +862,144 @@ if __name__ == "__main__":
         f"{best_lift:.4f}x"
     )
 
+
+    # =========================================================
+    # MODEL BASELINE COMPARISON
+    # LOGISTIC REGRESSION VS LIGHTGBM
+    # =========================================================
+
+    print(
+        "\n=== VALIDATION MODEL COMPARISON ==="
+    )
+
+    # Use the same predefined candidate feature set for both
+    # models so the algorithm is the main difference.
+    comparison_feature_cols = (
+        FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC
+    )
+
+    X_train_comparison = train_df[
+        comparison_feature_cols
+    ].copy()
+
+    X_val_comparison = val_df[
+        comparison_feature_cols
+    ].copy()
+
+
+    # ---------------------------------------------------------
+    # LOGISTIC REGRESSION
+    # ---------------------------------------------------------
+
+    logistic_model = fit_logistic_regression(
+        X_train_comparison,
+        y_train,
+    )
+
+    logistic_val_score = (
+        logistic_model.predict_proba(
+            X_val_comparison
+        )[:, 1]
+    )
+
+    logistic_metrics = {
+        "model": "Logistic Regression",
+        "n_features": len(
+            comparison_feature_cols
+        ),
+        "roc_auc": roc_auc_score(
+            y_val,
+            logistic_val_score,
+        ),
+        "pr_auc": average_precision_score(
+            y_val,
+            logistic_val_score,
+        ),
+    }
+
+    logistic_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            logistic_val_score,
+            k=0.05,
+        )
+    )
+
+
+    # ---------------------------------------------------------
+    # LIGHTGBM
+    # ---------------------------------------------------------
+
+    lightgbm_baseline_model = (
+        fit_lightgbm_with_weight(
+            X_train_comparison,
+            y_train,
+            scale_pos_weight=1,
+        )
+    )
+
+    lightgbm_val_score = (
+        lightgbm_baseline_model.predict_proba(
+            X_val_comparison
+        )[:, 1]
+    )
+
+    lightgbm_baseline_metrics = {
+        "model": "LightGBM",
+        "n_features": len(
+            comparison_feature_cols
+        ),
+        "roc_auc": roc_auc_score(
+            y_val,
+            lightgbm_val_score,
+        ),
+        "pr_auc": average_precision_score(
+            y_val,
+            lightgbm_val_score,
+        ),
+    }
+
+    lightgbm_baseline_metrics.update(
+        ranking_metrics_at_k(
+            y_val,
+            lightgbm_val_score,
+            k=0.05,
+        )
+    )
+
+
+    # ---------------------------------------------------------
+    # COMPARISON TABLE
+    # ---------------------------------------------------------
+
+    model_comparison_df = pd.DataFrame(
+        [
+            logistic_metrics,
+            lightgbm_baseline_metrics,
+        ]
+    )
+
+    model_comparison_cols = [
+        "model",
+        "n_features",
+        "roc_auc",
+        "pr_auc",
+        "precision_at_5pct",
+        "recall_at_5pct",
+        "lift_at_5pct",
+    ]
+
+    print(
+        model_comparison_df[
+            model_comparison_cols
+        ].to_string(index=False)
+    )
+
+    model_comparison_df.to_csv(
+        DATA_DIR
+        / "weekly_model_comparison.csv",
+        index=False,
+    )
     # =========================================================
     # SAVE VALIDATION RESULTS
     # =========================================================

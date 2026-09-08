@@ -21,7 +21,7 @@ STOP_WORDS = set(stopwords.words("english"))
 # initialize lemmatizer for reducing words to their base form
 LEMMATIZER = WordNetLemmatizer()
 # only want to fit TF-IDF on events that occurred before this cutoff, to avoid data leakage
-TEXT_FIT_END = pd.Timestamp('2019-10-08", tx = "UTC")
+TEXT_FIT_END = pd.Timestamp("2019-10-08", tz = "UTC")
 
 
 def preprocess_text(text: str) -> str:

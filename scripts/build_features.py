@@ -25,8 +25,10 @@ def load_and_clean(path: Path) -> pd.DataFrame:
 
     return df
 
-# Building RFM features for one cutoff, then rolling across all cutoffs
-# cutoffs range from 2019-10-08 to 2019-10-24, every 3 days, with a 7-day lookahead for the label
+# Build user-level behavioral features at multiple prediction cutoffs.
+# Candidate cutoffs are generated every 2 days from October 4 through
+# October 24. Train, validation, and test cutoffs are selected later
+# using a purged temporal split so their 7-day outcome windows do not overlap.
 CUTOFF_DATES = pd.date_range("2019-10-04", "2019-10-24", freq="2D", tz="UTC")
 LOOKAHEAD_DAYS = 7
 
@@ -244,7 +246,7 @@ def build_user_features_for_cutoff(df: pd.DataFrame, cutoff: pd.Timestamp) -> pd
     features[ratio_cols] = (
         features[ratio_cols]
         .replace([np.inf, -np.inf], np.nan)
-        .fillna(z0)
+        .fillna(0)
     )
 
     last_purchase_time = (

@@ -59,6 +59,14 @@ FEATURE_COLS_PRODUCT_CATEGORY = [
     "price_range_viewed",
 ]
 
+FEATURE_COLS_CORE_PURCHASE_PRODUCT = list(
+    dict.fromkeys(
+        FEATURE_COLS_CORE
+        + FEATURE_COLS_PURCHASE_HISTORY
+        + FEATURE_COLS_PRODUCT_CATEGORY
+    )
+)
+
 FEATURE_COLS_SEMANTIC = [
     f"user_text_dim_{i}"
     for i in range(20)
@@ -520,12 +528,6 @@ if __name__ == "__main__":
         FEATURE_COLS_CORE,
         FEATURE_COLS_PURCHASE_HISTORY,
         FEATURE_COLS_ENGAGEMENT_ONLY,
-    )
-
-    FEATURE_COLS_CORE_PURCHASE_PRODUCT = combine_features(
-        FEATURE_COLS_CORE,
-        FEATURE_COLS_PURCHASE_HISTORY,
-        FEATURE_COLS_PRODUCT_CATEGORY,
     )
 
     FEATURE_COLS_CORE_PURCHASE_SEMANTIC = combine_features(

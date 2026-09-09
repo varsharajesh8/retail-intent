@@ -1,20 +1,17 @@
-from pathlib import Path
 
 import pandas as pd
 from sklearn.metrics import (
     average_precision_score,
     roc_auc_score,
 )
-
 from train_weekly_model import (
     DATA_DIR,
-    LABEL_COL,
     FEATURE_COLS_FULL_PLUS_PRODUCT,
     FEATURE_COLS_FULL_PLUS_PRODUCT_SEMANTIC,
+    LABEL_COL,
     fit_lightgbm_with_weight,
     ranking_metrics_at_k,
 )
-
 
 # =========================================================
 # PURPOSE

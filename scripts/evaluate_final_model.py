@@ -1,23 +1,19 @@
-import pandas as pd
 import matplotlib.pyplot as plt
-
-
+import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.metrics import (
     average_precision_score,
     roc_auc_score,
 )
-
 from train_weekly_model import (
     DATA_DIR,
-    LABEL_COL,
     FEATURE_COLS_CORE_PURCHASE_PRODUCT,
+    LABEL_COL,
+    TEST_CUTOFFS,
     TRAIN_CUTOFFS,
     VALIDATION_CUTOFFS,
-    TEST_CUTOFFS,
     ranking_metrics_at_k,
 )
-
 
 # -----------------------------------------------------------------------------
 # Final held-out test evaluation

@@ -8,7 +8,6 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 

@@ -11,3 +11,4 @@ nltk
 sentence-transformers
 jupyter
 anthropic
+shap

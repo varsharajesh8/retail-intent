@@ -206,21 +206,21 @@ if __name__ == "__main__":
     vector_cols = [f"text_dim_{i}" for i in range(text_vectors.shape[1])]
     # raw NumPy array -> pandas DF, each row is a catefory with 20 numeric columns describing category's position in compressed text-embedding space
     text_features_df = pd.DataFrame(
-    text_vectors,
-    columns=vector_cols
-)
+        text_vectors,
+        columns=vector_cols
+    )
 
-# Add category_code so the semantic vectors can be merged
-# back onto event/category data later.
-text_features_df.insert(
-    0,
-    "category_code",
-    categories,
-)
+    # Add category_code so the semantic vectors can be merged
+    # back onto event/category data later.
+    text_features_df.insert(
+        0,
+        "category_code",
+        categories,
+    )
 
-print(text_features_df.head(10))
+    print(text_features_df.head(10))
 
-text_features_df.to_parquet(
-    CATEGORY_TEXT_FEATURES_OUT,
-    index=False
-)
+    text_features_df.to_parquet(
+        CATEGORY_TEXT_FEATURES_OUT,
+        index=False
+    )

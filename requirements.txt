@@ -9,4 +9,5 @@ tqdm
 requests
 nltk
 sentence-transformers
-jupyteranthropic
+jupyter
+anthropic
